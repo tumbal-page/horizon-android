@@ -1,0 +1,160 @@
+# Stage B: apply one tiny native bundle (native-mods/stage_b_probe) with horizon-mixins and build the
+# Android APK from the modified source. Success = a box in the top-left corner of the game that says
+# "Stage B: native mod active". Manual trigger only.
+name: Stage B - native mod probe APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: "Cargo profile: fast (no LTO, lighter) or release (ThinLTO, heavier)"
+        type: choice
+        options:
+          - fast
+          - release
+        default: fast
+
+permissions:
+  contents: read
+
+concurrency:
+  group: stage-b-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    env:
+      HORIZON_TELEMETRY_URL: "off"
+      CARGO_BUILD_JOBS: "3"
+      ABI: arm64-v8a
+      TARGET: aarch64-linux-android
+      # The horizon-mixins commit that Horizon's own coords-hud native mod names in its compatibility.json.
+      MIXINS_REV: 0d6b103c70633d8fd9443d8d0acd3aadaacedb06
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+
+      - name: Start resource monitor
+        run: |
+          cat > "$RUNNER_TEMP/mem.sh" <<'EOS'
+          #!/usr/bin/env bash
+          while true; do
+            echo "$(date +%T) $(free -m | awk 'NR==2{print $3}')" >> "$RUNNER_TEMP/mem.log"
+            sleep 30
+          done
+          EOS
+          chmod +x "$RUNNER_TEMP/mem.sh"
+          nohup "$RUNNER_TEMP/mem.sh" >/dev/null 2>&1 &
+          echo "cores: $(nproc)"
+          free -m | head -2
+          df -h / | tail -1
+
+      - name: Install Android SDK pieces
+        run: |
+          SDKM="$(command -v sdkmanager || true)"
+          if [ -z "$SDKM" ]; then
+            SDKM="$(find "$ANDROID_HOME" -maxdepth 4 -path '*cmdline-tools*' -name sdkmanager -type f | head -1)"
+          fi
+          echo "sdkmanager: $SDKM"
+          test -n "$SDKM"
+          yes | "$SDKM" --licenses > /dev/null || true
+          "$SDKM" "platforms;android-35" "ndk;28.2.13676358" "build-tools;35.0.0"
+
+      - name: Rust toolchain (pinned by rust-toolchain.toml)
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add "$TARGET"
+          rustc --version
+
+      - name: Gradle 8.14
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/gradle.zip" https://services.gradle.org/distributions/gradle-8.14-bin.zip
+          curl -fsSL -o "$RUNNER_TEMP/gradle.sha256" https://services.gradle.org/distributions/gradle-8.14-bin.zip.sha256
+          echo "$(tr -d '[:space:]' < "$RUNNER_TEMP/gradle.sha256")  $RUNNER_TEMP/gradle.zip" | sha256sum -c -
+          unzip -q "$RUNNER_TEMP/gradle.zip" -d "$RUNNER_TEMP"
+          echo "GRADLE_BIN=$RUNNER_TEMP/gradle-8.14/bin/gradle" >> "$GITHUB_ENV"
+
+      - name: Restore the stored signing key (optional)
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_DEBUG_KEYSTORE_B64 }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ]; then
+            mkdir -p .local/android
+            printf '%s' "$KEYSTORE_B64" | base64 -d > .local/android/debug.keystore
+            echo "Using the stored signing key: this APK can update the previous one."
+          else
+            echo "No stored signing key: this APK gets a throwaway key."
+          fi
+
+      - name: Prepare engine tables from the pristine source (Mojang files stay on the runner)
+        run: python3 tools/android_prepare.py
+
+      - name: Build horizon-mixins at the pinned commit
+        run: |
+          git init -q "$RUNNER_TEMP/hm"
+          git -C "$RUNNER_TEMP/hm" remote add origin https://github.com/horizon-rust/horizon-mixins.git
+          git -C "$RUNNER_TEMP/hm" fetch -q --depth 1 origin "$MIXINS_REV"
+          git -C "$RUNNER_TEMP/hm" checkout -q FETCH_HEAD
+          cd "$RUNNER_TEMP/hm"
+          rustup toolchain install
+          cargo fetch --locked
+          cargo build --release --locked -p horizon-mixins-cli
+          ls -l target/release/horizon-mixins
+
+      - name: Apply the native bundle
+        run: |
+          # horizon-mixins reads Cargo metadata offline, so fetch the game's dependencies first.
+          cargo fetch --locked
+          # It rejects symlinks (CLAUDE.md is one) and wants the bundles outside the workspace.
+          rm -f CLAUDE.md
+          mv native-mods "$RUNNER_TEMP/mods"
+          "$RUNNER_TEMP/hm/target/release/horizon-mixins" plan \
+            --workspace . --mods "$RUNNER_TEMP/mods" --out "$RUNNER_TEMP/plan.json"
+          "$RUNNER_TEMP/hm/target/release/horizon-mixins" apply \
+            --workspace . --mods "$RUNNER_TEMP/mods" --out "$RUNNER_TEMP/staged"
+          echo "--- everything apply changed against the checkout:"
+          diff -rq --exclude=.git --exclude=.local --exclude=target . "$RUNNER_TEMP/staged" | head -30 || true
+          # Keep tools/, packaging/ and .local in place: copy only the staged crates over the checkout.
+          rsync -a "$RUNNER_TEMP/staged/crates/" crates/
+          git diff -- crates > "$RUNNER_TEMP/injection.diff" || true
+          git diff --stat -- crates | tail -5
+          test -s "$RUNNER_TEMP/injection.diff"
+
+      - name: Build APK from the modified source
+        run: |
+          JAVA17="${JAVA_HOME_17_X64:-$JAVA_HOME}"
+          echo "java home for signing: $JAVA17"
+          python3 tools/android_build.py --abi "$ABI" --public --profile "${{ inputs.profile }}" \
+            --sdk "$ANDROID_HOME" --java-home "$JAVA17" --gradle "$GRADLE_BIN"
+
+      - name: Collect outputs
+        run: |
+          mkdir -p dist
+          cp ".local/android/apk/$ABI/horizon-android-public.apk" dist/
+          cp "$RUNNER_TEMP/injection.diff" dist/ || true
+
+      - name: Resource report
+        if: always()
+        run: |
+          df -h / | tail -1
+          sort -k2 -n "$RUNNER_TEMP/mem.log" 2>/dev/null | tail -1 | awk '{print "peak memory used (MB):", $2, "at", $1}' || true
+          sha256sum dist/*.apk 2>/dev/null || true
+          ls -l dist 2>/dev/null || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: stage-b-apk-arm64-v8a
+          path: dist/horizon-android-public.apk
+          if-no-files-found: error
+          retention-days: 7
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: stage-b-injection-diff
+          path: dist/injection.diff
+          if-no-files-found: ignore
+          retention-days: 7

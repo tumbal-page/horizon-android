@@ -1,0 +1,17 @@
+# Stage B probe: the smallest native bundle that is visible in game.
+# It uses only Horizon's named hook points (native_hud), the same way Horizon's own coords-hud mod does.
+[mod]
+id = "stage_b_probe"
+version = "0.1.0"
+priority = 100
+
+[[injection]]
+id = "hud"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_hud"
+helper = "hud.rs"
+bindings = [
+  { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
+  { name = "batch", ty = "&mut horizon_client::hud::HudBatch", value = "&mut *batch" },
+  { name = "corners", ty = "&mut horizon_client::extras_hud::Corners", value = "&mut *corners" },
+]

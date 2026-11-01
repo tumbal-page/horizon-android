@@ -1,0 +1,103 @@
+# Stage A: build the unmodified Horizon Android APK in the cloud, to learn what the build needs
+# (time, memory, disk) before any mod is added. Manual trigger only.
+name: Stage A - baseline Android APK (no mods)
+
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: "Cargo profile: fast (no LTO, lighter) or release (ThinLTO, heavier)"
+        type: choice
+        options:
+          - fast
+          - release
+        default: fast
+
+permissions:
+  contents: read
+
+concurrency:
+  group: stage-a-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    env:
+      HORIZON_TELEMETRY_URL: "off"
+      CARGO_BUILD_JOBS: "3"
+      ABI: arm64-v8a
+      TARGET: aarch64-linux-android
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+
+      - name: Start resource monitor
+        run: |
+          cat > "$RUNNER_TEMP/mem.sh" <<'EOS'
+          #!/usr/bin/env bash
+          while true; do
+            echo "$(date +%T) $(free -m | awk 'NR==2{print $3}')" >> "$RUNNER_TEMP/mem.log"
+            sleep 30
+          done
+          EOS
+          chmod +x "$RUNNER_TEMP/mem.sh"
+          nohup "$RUNNER_TEMP/mem.sh" >/dev/null 2>&1 &
+          echo "cores: $(nproc)"
+          free -m | head -2
+          df -h / | tail -1
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost /opt/hostedtoolcache/CodeQL || true
+          df -h / | tail -1
+
+      - name: Install Android SDK pieces
+        run: |
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager "platforms;android-35" "ndk;28.2.13676358" "build-tools;35.0.0"
+
+      - name: Rust toolchain (pinned by rust-toolchain.toml)
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add "$TARGET"
+          rustc --version
+
+      - name: Gradle 8.14
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/gradle.zip" https://services.gradle.org/distributions/gradle-8.14-bin.zip
+          curl -fsSL -o "$RUNNER_TEMP/gradle.sha256" https://services.gradle.org/distributions/gradle-8.14-bin.zip.sha256
+          echo "$(tr -d '[:space:]' < "$RUNNER_TEMP/gradle.sha256")  $RUNNER_TEMP/gradle.zip" | sha256sum -c -
+          unzip -q "$RUNNER_TEMP/gradle.zip" -d "$RUNNER_TEMP"
+          echo "GRADLE_BIN=$RUNNER_TEMP/gradle-8.14/bin/gradle" >> "$GITHUB_ENV"
+
+      - name: Prepare engine tables (downloads Mojang files; they stay on the runner)
+        run: python3 tools/android_prepare.py
+
+      - name: Build APK
+        run: |
+          python3 tools/android_build.py --abi "$ABI" --public --profile "${{ inputs.profile }}" \
+            --sdk "$ANDROID_HOME" --java-home "$JAVA_HOME_17_X64" --gradle "$GRADLE_BIN"
+
+      - name: Collect APK
+        run: |
+          mkdir -p dist
+          cp ".local/android/apk/$ABI/horizon-android-public.apk" dist/
+
+      - name: Resource report
+        if: always()
+        run: |
+          df -h / | tail -1
+          sort -k2 -n "$RUNNER_TEMP/mem.log" 2>/dev/null | tail -1 | awk '{print "peak memory used (MB):", $2, "at", $1}' || true
+          sha256sum dist/*.apk 2>/dev/null || true
+          ls -l dist 2>/dev/null || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: horizon-android-baseline-arm64-v8a
+          path: dist/horizon-android-public.apk
+          if-no-files-found: error
+          retention-days: 7

@@ -1,0 +1,9 @@
+id = "cairn"
+name = "Cairn"
+version = "0.1.0"
+description = "A small stacked-stone marker block. Stage C1: the block only, no behaviour yet."
+authors = ["tumbal-page"]
+# A content mod: blocks, items and mob effects from data/ and assets/, no code (API 0.2).
+api = "0.2"
+side = "both"
+capabilities = ["registries"]

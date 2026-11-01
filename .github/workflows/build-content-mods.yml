@@ -1,0 +1,65 @@
+# Builds every content mod in content-mods/ into a .hmod with Horizon's own cargo-horizon-mod tool
+# (its build runs the same content checks the game makes), then publishes them on the
+# "content-latest" release so the Android app can import one by its HTTPS link:
+#   https://github.com/<owner>/<repo>/releases/download/content-latest/<id>.hmod
+name: Build content mods (.hmod)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [android]
+    paths:
+      - "content-mods/**"
+      - ".github/workflows/build-content-mods.yml"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: content-mods-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+
+      - name: Rust toolchain (pinned by rust-toolchain.toml)
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustc --version
+
+      - name: Build cargo-horizon-mod
+        run: cargo build --locked --profile fast -p cargo-horizon-mod
+
+      - name: Build, check and collect the content mods
+        run: |
+          TOOL="$GITHUB_WORKSPACE/target/fast/cargo-horizon-mod"
+          mkdir -p dist
+          for dir in content-mods/*/; do
+            id="$(basename "$dir")"
+            echo "=== $id"
+            (cd "$dir" && "$TOOL" horizon-mod build)
+            (cd "$dir" && "$TOOL" horizon-mod check "target/horizon-mod/$(grep -m1 '^id' horizon-mod.toml | cut -d'"' -f2).hmod")
+            cp "$dir"target/horizon-mod/*.hmod dist/
+          done
+          ls -l dist
+          sha256sum dist/*.hmod
+
+      - name: Publish on the content-latest release
+        run: |
+          gh release delete content-latest --cleanup-tag --yes >/dev/null 2>&1 || true
+          gh release create content-latest dist/*.hmod \
+            --title "Content mods (latest build)" \
+            --notes "Built from ${GITHUB_SHA}. In the app: Mods tab, paste the .hmod link, Import, then enable it under Installed." \
+            --prerelease --target "$GITHUB_SHA"
+          for f in dist/*.hmod; do
+            echo "Import link: https://github.com/${GITHUB_REPOSITORY}/releases/download/content-latest/$(basename "$f")"
+          done

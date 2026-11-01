@@ -1,0 +1,11 @@
+{
+  "type": "minecraft:block",
+  "pools": [
+    {
+      "condition": { "type": "minecraft:survives_explosion" },
+      "entries": [{ "type": "minecraft:item", "name": "cairn:cairn" }],
+      "rolls": 1
+    }
+  ],
+  "random_sequence": "cairn:blocks/cairn"
+}

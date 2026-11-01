@@ -1,0 +1,6 @@
+{
+  "type": "minecraft:crafting_shapeless",
+  "category": "building",
+  "ingredients": ["minecraft:cobblestone", "minecraft:cobblestone", "minecraft:cobblestone"],
+  "result": { "id": "cairn:cairn" }
+}

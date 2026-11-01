@@ -49,16 +49,29 @@ jobs:
           free -m | head -2
           df -h / | tail -1
 
-      - name: Free disk space
+      - name: Inspect runner toolchains
         run: |
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost /opt/hostedtoolcache/CodeQL || true
-          df -h / | tail -1
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          ls "$ANDROID_HOME" || true
+          ls "$ANDROID_HOME/cmdline-tools" 2>/dev/null || true
+          ls "$ANDROID_HOME/ndk" 2>/dev/null || true
+          ls "$ANDROID_HOME/build-tools" 2>/dev/null || true
+          ls "$ANDROID_HOME/platforms" 2>/dev/null || true
+          env | grep -E '^JAVA_HOME' || true
+          java -version 2>&1 | head -1
+          python3 --version
+          rustup --version 2>&1 | head -1 || true
 
       - name: Install Android SDK pieces
         run: |
-          echo "ANDROID_HOME=$ANDROID_HOME"
-          yes | sdkmanager --licenses > /dev/null || true
-          sdkmanager "platforms;android-35" "ndk;28.2.13676358" "build-tools;35.0.0"
+          SDKM="$(command -v sdkmanager || true)"
+          if [ -z "$SDKM" ]; then
+            SDKM="$(find "$ANDROID_HOME" -maxdepth 4 -path '*cmdline-tools*' -name sdkmanager -type f | head -1)"
+          fi
+          echo "sdkmanager: $SDKM"
+          test -n "$SDKM"
+          yes | "$SDKM" --licenses > /dev/null || true
+          "$SDKM" "platforms;android-35" "ndk;28.2.13676358" "build-tools;35.0.0"
 
       - name: Rust toolchain (pinned by rust-toolchain.toml)
         run: |
@@ -79,8 +92,10 @@ jobs:
 
       - name: Build APK
         run: |
+          JAVA17="${JAVA_HOME_17_X64:-$JAVA_HOME}"
+          echo "java home for signing: $JAVA17"
           python3 tools/android_build.py --abi "$ABI" --public --profile "${{ inputs.profile }}" \
-            --sdk "$ANDROID_HOME" --java-home "$JAVA_HOME_17_X64" --gradle "$GRADLE_BIN"
+            --sdk "$ANDROID_HOME" --java-home "$JAVA17" --gradle "$GRADLE_BIN"
 
       - name: Collect APK
         run: |
